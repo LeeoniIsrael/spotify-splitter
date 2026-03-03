@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .cache
 .spotify_cache
+.feature_cache.json
 node_modules/
 frontend/dist/
 frontend/.env

@@ -15,6 +15,13 @@ from backend.auth import get_auth_manager, get_spotify_client, get_current_user
 from backend.extractor import get_playlist_tracks, get_playlist_info
 from backend.classifier import classify_tracks, suggest_categories
 from backend.playlists import create_playlists, populate_playlists
+from backend.mixer import (
+    get_audio_features,
+    order_tracks_for_mix,
+    get_transition_details,
+    enrich_tracks_for_display,
+    reorder_playlist_on_spotify,
+)
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:5173", "http://127.0.0.1:5173"])
@@ -188,12 +195,80 @@ def classify():
 # ── Split (create + populate) ───────────────────────────────────────────────
 
 
+# ── Mix / Reorder ────────────────────────────────────────────────────────────
+
+
+@app.route("/api/mix/analyze", methods=["POST"])
+def mix_analyze():
+    """
+    Analyze tracks and return audio features + optimal mix order.
+    Body: { tracks: [{name, artist, uri}] }
+    """
+    data = request.get_json()
+    tracks = data.get("tracks", [])
+
+    if not tracks:
+        return jsonify({"error": "No tracks provided"}), 400
+
+    sp = _get_sp()
+    if sp is None:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    try:
+        features, source = get_audio_features(sp, tracks)
+        # Count how many tracks actually got real features
+        tracks_with_data = sum(1 for t in tracks if t.get("uri", "") in features)
+        ordered, scores, stats = order_tracks_for_mix(tracks, features)
+        transitions = get_transition_details(ordered, features)
+        enriched = enrich_tracks_for_display(ordered, features)
+
+        stats["tracks_with_data"] = tracks_with_data
+
+        return jsonify({
+            "ordered_tracks": enriched,
+            "transition_scores": scores,
+            "transitions": transitions,
+            "stats": stats,
+            "feature_source": source,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mix/reorder", methods=["POST"])
+def mix_reorder():
+    """
+    Reorder an existing playlist on Spotify for optimal mix transitions.
+    Body: { playlist_id: str, ordered_uris: [str] }
+    """
+    data = request.get_json()
+    raw_id = data.get("playlist_id", "")
+    playlist_id = _parse_playlist_id(raw_id)
+    ordered_uris = data.get("ordered_uris", [])
+
+    if not playlist_id or not ordered_uris:
+        return jsonify({"error": "Missing playlist_id or ordered_uris"}), 400
+
+    sp = _get_sp()
+    if sp is None:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    try:
+        reorder_playlist_on_spotify(sp, playlist_id, ordered_uris)
+        return jsonify({"success": True, "message": f"Reordered {len(ordered_uris)} tracks for seamless mixing!"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/split", methods=["POST"])
-def split():
-    """Create playlists and populate them with categorized tracks."""
+def split_with_mix():
+    """Create playlists and populate them — optionally with mix-optimized order."""
     data = request.get_json()
     categorized = data.get("categorized", {})
     source_name = data.get("source_name", "Playlist")
+    enable_mix = data.get("enable_mix", False)
 
     if not categorized:
         return jsonify({"error": "No categorized tracks provided"}), 400
@@ -203,6 +278,16 @@ def split():
         return jsonify({"error": "Not authenticated. Complete Spotify login first."}), 401
 
     try:
+        # If mix enabled, reorder each category's tracks for optimal transitions
+        mix_stats = {}
+        if enable_mix:
+            for category, cat_tracks in categorized.items():
+                if len(cat_tracks) > 2:
+                    features, source = get_audio_features(sp, cat_tracks)
+                    ordered, scores, stats = order_tracks_for_mix(cat_tracks, features)
+                    categorized[category] = ordered
+                    mix_stats[category] = stats
+
         playlist_ids = create_playlists(sp, categorized, source_name)
         results = populate_playlists(sp, categorized, playlist_ids)
 
@@ -210,6 +295,8 @@ def split():
         total_expected = sum(len(t) for t in categorized.values())
 
         msg = f"Created {len(playlist_ids)} playlists with {total_added} tracks!"
+        if enable_mix:
+            msg += " Mix-optimized for seamless transitions."
         if total_added < total_expected:
             msg = f"Created {len(playlist_ids)} playlists — added {total_added}/{total_expected} tracks."
 
@@ -217,10 +304,13 @@ def split():
             "playlist_ids": playlist_ids,
             "results": results,
             "message": msg,
+            "mix_stats": mix_stats if enable_mix else None,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8080)
+    # use_reloader=True but reloader_type='stat' avoids the leaked semaphore
+    # warning from Python 3.13's multiprocessing resource_tracker
+    app.run(debug=True, port=8080, use_reloader=True, reloader_type="stat")
