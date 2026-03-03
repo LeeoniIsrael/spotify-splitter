@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.cache
+.spotify_cache
+node_modules/
+frontend/dist/
+frontend/.env
+venv/
