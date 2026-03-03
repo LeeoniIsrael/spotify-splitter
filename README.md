@@ -4,6 +4,8 @@ AI-powered Spotify playlist splitter + DJ-quality mix optimizer. Split any playl
 
 > **Built by Leeon Israel** · Powered by Groq AI & Spotify
 
+![Spotify Splitter Results](screenshots/results.png)
+
 ---
 
 ## What It Does
